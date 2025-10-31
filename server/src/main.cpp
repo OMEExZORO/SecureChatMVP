@@ -37,6 +37,8 @@ public:
             handleHello(wsConnPtr, root);
         } else if (msgType == "MSG") {
             handleMessage(wsConnPtr, root);
+        } else if (msgType == "KEY_SHARE") {
+            handleKeyShare(wsConnPtr, root);
         } else {
             Json::Value error;
             error["type"] = "ERROR";
@@ -84,6 +86,27 @@ private:
         wsConnPtr->send(response.toStyledString());
         
         std::cout << "User " << userId << " registered" << std::endl;
+    }
+    
+    void handleKeyShare(const WebSocketConnectionPtr& wsConnPtr, const Json::Value& msg) {
+        std::string senderId = msg.get("senderId", "").asString();
+        std::string recipientId = msg.get("recipientId", "").asString();
+        
+        if (senderId.empty() || recipientId.empty()) {
+            sendReject(wsConnPtr, "senderId and recipientId are required for KEY_SHARE");
+            return;
+        }
+        
+        auto recipientConn = connRegistry->getConnection(recipientId);
+        if (!recipientConn) {
+            sendReject(wsConnPtr, "Recipient not online");
+            return;
+        }
+        
+        recipientConn->send(msg.toStyledString());
+        
+        std::cout << "KEY_SHARE relayed from " << senderId 
+                  << " to " << recipientId << std::endl;
     }
     
     void handleMessage(const WebSocketConnectionPtr& wsConnPtr, const Json::Value& msg) {
