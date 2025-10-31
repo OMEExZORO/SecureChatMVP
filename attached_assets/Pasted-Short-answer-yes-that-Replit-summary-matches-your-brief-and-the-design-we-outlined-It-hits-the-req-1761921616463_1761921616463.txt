@@ -1,0 +1,41 @@
+Short answer: yes—that Replit summary matches your brief and the design we outlined. It hits the required boxes: C++20 Drogon WS relay, React+TS client, AES-256-GCM E2E in the browser, PBKDF2-SHA256 key derivation, SHA-256 integrity check with PASS/FAIL, and replay protection via counter + timestamp. ✅
+
+Here are the only nits to make it airtight:
+
+authTag handling (Web Crypto quirk)
+Web Crypto’s AES-GCM returns the tag appended to the ciphertext. If you list authTag separately in the envelope, you must split it yourself (last 16 bytes). Otherwise, just send a single ciphertext field and omit authTag.
+
+// split on encrypt
+const out = new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM", iv, additionalData:aad}, key, pt));
+const tagLen = 16; // bytes
+const raw = out.slice(0, out.length - tagLen);
+const tag = out.slice(out.length - tagLen);
+// base64 encode raw & tag separately if you want {ciphertext, authTag}
+
+// rejoin on decrypt
+const joined = new Uint8Array([...raw, ...tag]);
+await crypto.subtle.decrypt({name:"AES-GCM", iv, additionalData:aad}, key, joined);
+
+
+Pick one convention and use it on both sides.
+
+Timestamp format consistency
+Your server demo parses Unix seconds; your summary doesn’t specify. Use either Unix seconds everywhere (simple) or ISO-8601 everywhere. Just be consistent so the replay window (±5 min) works.
+
+Counter scope
+Enforce monotonicity per (senderId → recipientId) pair. That’s what your ReplayGuard does—keep it that way. It’s fine to store in-memory for MVP (resets on server restart).
+
+Salt
+For PBKDF2, use a random per-chat salt (base64) instead of a constant. Persist the salt with the conversation metadata (not secret, but must be stable).
+
+const saltB64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+
+
+Auth stub
+Your summary mentions “basic user registration.” Either keep the current HELLO handshake (simple) or add a tiny /auth/register + /auth/login (in-memory) to match the line item.
+
+AAD must match exactly
+Whatever you include as AAD (e.g., {senderId, recipientId, counter}), stringify identically on encrypt and decrypt—same key order/serializer.
+
+Educational ciphers
+Keep XOR/Caesar under a Strategy toggle for demos/tests only. Default must be AES-GCM.

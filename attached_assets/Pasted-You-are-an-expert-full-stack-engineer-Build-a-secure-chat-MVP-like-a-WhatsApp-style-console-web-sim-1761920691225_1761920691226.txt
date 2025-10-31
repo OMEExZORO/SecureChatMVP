@@ -1,0 +1,189 @@
+You are an expert full-stack engineer. Build a secure chat MVP like a WhatsApp-style console/web simulation with:
+
+Goal (MVP)
+
+End-to-end-style encrypted 1:1 chat.
+
+Symmetric key encryption for messages + hash for integrity verification.
+
+Replay protection (message counters + timestamps).
+
+Clear, testable secure message flow:
+
+Sender: plaintext → encrypt with symmetric key → compute SHA-256 of plaintext → send {ciphertext, iv/nonce, authTag, sha256, counter, timestamp, senderId, recipientId}.
+
+Receiver: verify counter/timestamp window → decrypt → recompute SHA-256 → PASS/FAIL.
+
+Tech Stack
+
+Backend (C++20): Drogon (HTTP + WebSocket) or Boost.Beast if you prefer; CMake; vcpkg for deps.
+
+Crypto (default strong): OpenSSL (AES-256-GCM, SHA-256) or libsodium (XChaCha20-Poly1305 + crypto_hash_sha256).
+
+Educational fallback: Implement EncryptionStrategy with XorCipher and CaesarCipher for unit tests/demos (NOT default in prod).
+
+Frontend (React + TypeScript + Vite): WebSocket client, clean chat UI, uses Web Crypto API AES-GCM for true client-side encryption so the server can’t read messages.
+
+Shared: JSON over WebSocket; nlohmann/json for C++.
+
+Repository Structure
+
+secure-chat/
+  README.md
+  /server       # C++ (Drogon/Beast)
+    CMakeLists.txt
+    /src /include
+    .env.example
+    /tests (GoogleTest)
+  /client       # React + TS + Vite
+    package.json
+    src/
+  /docs
+    threat-model.md
+    crypto-design.md
+
+
+Security Model (MVP, symmetric focus)
+
+Keying: Each conversation uses a pre-shared passphrase → derive 256-bit key with PBKDF2-HMAC-SHA256 (salt + 200k iterations) or HKDF if raw key is given.
+
+AEAD: AES-256-GCM with 96-bit random IV per message; include {senderId, recipientId, counter} as AAD.
+
+Integrity: Even though GCM authenticates, also compute SHA-256 of plaintext (assignment requirement) and ship it separately for receiver verification after decrypt.
+
+Replay protection: Include a monotonic counter and ISO8601 timestamp. Server rejects stale (>5 min skew) or duplicate counters per (senderId, recipientId) tuple. Receiver also checks monotonicity.
+
+Metadata privacy: Server only sees envelope fields; never plaintext.
+
+Auth: Minimal JWT session for WebSocket connect. Registration stores password as Argon2id (libsodium) or PBKDF2-SHA256 with random salt.
+
+OOP Design (maximize concepts)
+
+IEncryptionStrategy (pure virtual) → AesGcmCipher, XorCipher, CaesarCipher.
+
+IHasher → Sha256Hasher, FakeHasherForTests.
+
+KeyDeriver (PBKDF2/HKDF) with RAII for key/IV buffers, zeroization on destruction.
+
+Message (value object) encapsulates plaintext/ciphertext; Packet (envelope DTO).
+
+CryptoContext (composition of strategy + hasher + deriver).
+
+SessionManager (JWT), ReplayGuard (counter/timestamp windows), User, Conversation.
+
+Patterns: Strategy, Factory, Builder (PacketBuilder), Adapter (OpenSSL/lib­sodium), Observer (server event bus), Repository (UserRepo in-memory/JSON), Singleton (Config), RAII for secure buffers.
+
+Smart pointers, exceptions, namespaces, const-correctness, rule-of-5 where needed.
+
+Backend Requirements
+
+WebSocket endpoint: /ws (JWT required).
+
+REST: /auth/register, /auth/login, /healthz.
+
+Server acts as relay only:
+
+Validates JWT, basic rate limit, enforces replay checks on envelope.
+
+Does NOT decrypt ciphertext (preserves E2E property).
+
+Persists last-seen counter per (senderId, recipientId).
+
+Configurable cipher via env: CIPHER_MODE=AES_GCM|XOR|CAESAR (default AES_GCM).
+
+Logging with spdlog (no secrets in logs).
+
+Unit tests (GoogleTest): encryption-decryption round-trip, hash PASS/FAIL, replay rejection, counter windows.
+
+Frontend Requirements
+
+Screens: Login/Register → Chat (list + active thread) → Key Setup modal (enter passphrase per chat).
+
+Derive key client-side (PBKDF2 via Web Crypto) → cache in memory only.
+
+On send: encrypt with AES-GCM (Web Crypto), compute SHA-256 (Web Crypto), build envelope, send over WS.
+
+On receive: verify counter/timestamp, decrypt, recompute SHA-256, show Verification: PASS/FAIL chip.
+
+UI states: connected, reconnecting, message pending/sent/failed, verification badge, time, counter.
+
+Basic accessibility and responsive layout.
+
+Data Contracts (JSON)
+
+Packet {
+  type: "MSG",
+  senderId: string,
+  recipientId: string,
+  counter: number,
+  timestamp: string,            // ISO8601
+  cipher: "AES-256-GCM",
+  iv: string,                   // base64
+  aad: { senderId, recipientId, counter },
+  ciphertext: string,           // base64
+  authTag: string,              // base64 (if separate)
+  sha256_plaintext: string      // hex
+}
+
+
+Build & Run (scripts)
+
+Backend: cmake -S . -B build && cmake --build build && ./build/server
+
+Frontend: npm i && npm run dev
+
+Provide .env.example with ports, JWT secret, CIPHER_MODE, KDF params.
+
+Add make dev to run both with concurrently.
+
+Testing & Demo
+
+Unit tests: ctest (encryption round-trip, wrong key fails, hash mismatch flagged, replay blocked).
+
+E2E demo: open two browser tabs, same conversation passphrase, exchange messages; server logs show relay only; UI shows PASS for intact messages and FAIL if tampered.
+
+Include a CLI tool (/server/tools/crypto_smoke) to encrypt/decrypt a string with selected strategy for grading.
+
+Docs
+
+docs/crypto-design.md: why AES-GCM by default; how XOR/Caesar are educational only.
+
+docs/threat-model.md: assets, adversaries, mitigations, what’s out-of-scope (no contact discovery, no FS).
+
+README.md: setup, run, screenshots, API, test matrix.
+
+Stretch (optional, behind flags)
+
+Key rotation every N messages (counter-based HKDF).
+
+Simple pre-key exchange using X25519 (libsodium) to derive the symmetric key (getting closer to WhatsApp/Signal).
+
+Message attachments (encrypt in chunks).
+
+Dockerfiles for server/client.
+
+Acceptance Criteria
+
+Messages sent from one client arrive encrypted at the server and are readable only at the other client.
+
+AES-GCM default path passes all unit tests; XOR/Caesar strategies exist and are selectable for demonstration.
+
+Hash verification PASS/FAIL visible in UI.
+
+Replay attempts (duplicate/lower counter or stale timestamp) are rejected by server and UI shows an error.
+
+Code exhibits OOP principles (interfaces, inheritance, composition, patterns, RAII, tests).
+
+Clear build/run instructions; works on Windows + Linux.
+
+Generate:
+
+Full backend C++ code (headers + impl), CMake, vcpkg.json, tests.
+
+Full React + TS code with WebSocket client and Web Crypto usage.
+
+Complete README + docs + .env.example.
+
+Sample test vectors.
+
+A short “Security Notes” section reminding that XOR/Caesar are for learning only; AES-GCM is default.

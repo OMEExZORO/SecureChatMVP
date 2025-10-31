@@ -1,0 +1,79 @@
+You are to build a secure chat MVP that MUST use:
+
+Backend: C++20 with Drogon (WebSocket relay + small REST), built via CMake in a Nix environment (Replit compatible).
+
+Frontend: React + TypeScript (Vite).
+
+Crypto model: End-to-end style. Clients derive a symmetric key from a per-chat passphrase using PBKDF2-HMAC-SHA-256 (salt + 200k iters) and encrypt each message with AES-256-GCM (Web Crypto). Include AAD = {senderId, recipientId, counter}. Compute SHA-256 of the plaintext and include it in the envelope for PASS/FAIL verification after decrypt (assignment requirement).
+
+Replay protection: Monotonic counter per (senderId→recipientId) and timestamp window (±5 minutes). Server rejects duplicates/old counters; client also checks.
+
+Auth: Minimal JWT (HMAC) or a temporary “HELLO” register message carrying userId (for demo). Do not decrypt on the server.
+
+Deliverables (monorepo):
+
+secure-chat/
+  /server       # C++20, Drogon, CMake
+    CMakeLists.txt
+    src/main.cpp
+    src/ReplayGuard.{hpp,cpp}
+    src/ConnRegistry.{hpp,cpp}
+    include/...
+    .env.example
+  /client       # React + TS + Vite
+    src/crypto.ts
+    src/ws.ts
+    src/App.tsx
+    index.html, vite.config.ts
+  replit.nix
+  .replit
+  README.md
+  docs/crypto-design.md
+  docs/threat-model.md
+
+
+Server behavior (Drogon):
+
+WebSocket at /ws.
+
+On connect, expect a first JSON message {type:"HELLO", userId}. Store connection in ConnRegistry.
+
+On message {type:"MSG", senderId, recipientId, counter, timestamp, iv, ciphertext, authTag, sha256_plaintext, aad}:
+
+Validate timestamp within ±5 min; counter strictly greater than last seen for (senderId, recipientId).
+
+If invalid → send {type:"REJECT", reason} to sender.
+
+Else forward the entire packet to recipientId if online. Do not decrypt.
+
+Client behavior (React):
+
+Passphrase modal per chat → derive 256-bit key with PBKDF2 (Web Crypto).
+
+On send: AES-GCM encrypt, compute SHA-256(plaintext), increment counter, attach timestamp, send packet over WS.
+
+On receive: verify counter/timestamp; decrypt; recompute SHA-256 → show Verification: PASS/FAIL badge.
+
+Provide a strategy selector (AES-GCM default, XOR/Caesar for demo) to satisfy OOP requirement (education-only modes).
+
+OOP emphasis (even though server doesn’t decrypt):
+
+IEncryptionStrategy (for CLI tests and optional server tools) → AesGcmCipher (stub if no server decryption), XorCipher, CaesarCipher.
+
+IHasher → Sha256Hasher.
+
+ReplayGuard class (holds last counters + time windows).
+
+ConnRegistry class (maps userId↔connection).
+
+RAII for zeroizing sensitive buffers, const-correctness, Strategy/Factory patterns.
+
+Scaffold with these exact files and content (fill out any TODOs):
+
+Use the replit.nix and .replit below.
+
+Provide working server/src/main.cpp with Drogon WS that compiles.
+
+Provide working React app (Vite) with Web Crypto calls and a simple chat UI.
+
+Add README.md with run steps for Replit: open two browser windows, HELLO register as two users, exchange encrypted messages, observe PASS/FAIL and replay rejections.
