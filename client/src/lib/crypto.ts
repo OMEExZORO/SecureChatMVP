@@ -1,14 +1,187 @@
-export interface EncryptionResult {
-  ciphertext: string;
-  iv: string;
-  authTag: string;
-  sha256: string;
+// Custom cryptographic implementations for secure chat
+// Educational implementations of encryption algorithms
+// NO external APIs used (except hardware RNG for true randomness)
+
+import { AES256 } from './aes';
+import { SHA256 } from './sha256';
+import { PBKDF2, computeHMAC as computeHMACInternal } from './pbkdf2';
+import { generateRandomBytes as generateRandom } from './random';
+
+const PBKDF2_ITERATIONS = 200000;
+const SALT_LENGTH = 16;
+const IV_LENGTH = 16; // Changed to 16 for AES-CBC
+
+export type CipherType = 'XOR' | 'CAESAR' | 'AES-256-CBC';
+
+export interface EncryptedData {
+  iv: string; // base64
+  ciphertext: string; // base64
+  authTag: string; // base64
+  sha256: string; // hex
 }
 
-export type EncryptionStrategy = 'AES-GCM' | 'XOR' | 'Caesar';
+export interface CipherInfo {
+  name: CipherType;
+  displayName: string;
+  securityLevel: 'low' | 'medium' | 'high';
+  description: string;
+  color: string;
+}
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
+export const AVAILABLE_CIPHERS: CipherInfo[] = [
+  {
+    name: 'XOR',
+    displayName: 'XOR Cipher',
+    securityLevel: 'low',
+    description: 'Simple XOR operation. Educational only - easily breakable.',
+    color: 'red'
+  },
+  {
+    name: 'CAESAR',
+    displayName: 'Caesar Cipher',
+    securityLevel: 'low',
+    description: 'Classical substitution cipher. Very weak - only 26 possible keys.',
+    color: 'orange'
+  },
+  {
+    name: 'AES-256-CBC',
+    displayName: 'AES-256-CBC (Custom)',
+    securityLevel: 'high',
+    description: 'Custom AES-256 implementation with S-Box, MixColumns, ShiftRows. Educational demonstration.',
+    color: 'green'
+  }
+];
+
+/**
+ * Generate a random salt for key derivation
+ */
+export async function generateSalt(): Promise<Uint8Array> {
+  return generateRandom(SALT_LENGTH);
+}
+
+/**
+ * Custom SHA-256 implementation
+ */
+async function computeSHA256Custom(data: string): Promise<string> {
+  return SHA256.hashString(data);
+}
+
+/**
+ * HMAC-SHA256 for authentication (custom implementation)
+ */
+async function computeHMAC(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+  return computeHMACInternal(key, data).slice(0, 16); // 16 bytes for tag
+}
+
+/**
+ * Derive an AES-256 key from a passphrase (returns raw bytes)
+ * Uses custom PBKDF2 implementation
+ */
+export async function deriveKeyBytes(
+  passphrase: string,
+  salt: Uint8Array
+): Promise<Uint8Array> {
+  return PBKDF2.derive(passphrase, salt, PBKDF2_ITERATIONS, 32);
+}
+
+/**
+ * Create canonical AAD (Additional Authenticated Data)
+ * Format: {"counter":N,"recipientId":"R","senderId":"S"}
+ * Keys MUST be alphabetically sorted
+ */
+export function createCanonicalAAD(aad: {
+  senderId: string;
+  recipientId: string;
+  counter: number;
+}): string {
+  const canonical = {
+    counter: aad.counter,
+    recipientId: aad.recipientId,
+    senderId: aad.senderId,
+  };
+  return JSON.stringify(canonical);
+}
+
+/**
+ * Encrypt plaintext using custom AES-256-CBC
+ */
+export async function encryptMessage(
+  plaintext: string,
+  key: Uint8Array,
+  aadString: string
+): Promise<EncryptedData> {
+  const encoder = new TextEncoder();
+  const plaintextBuffer = encoder.encode(plaintext);
+  const iv = generateRandom(IV_LENGTH);
+
+  // Create AES cipher
+  const aes = new AES256(key);
+
+  // Encrypt with AES-CBC
+  const ciphertext = aes.encryptCBC(plaintextBuffer, iv);
+
+  // Compute SHA-256 of plaintext for integrity
+  const sha256 = await computeSHA256Custom(plaintext);
+
+  // For CBC mode, create HMAC as authentication tag
+  const authTag = await computeHMAC(key, new Uint8Array([...ciphertext, ...encoder.encode(aadString)]));
+
+  return {
+    iv: arrayBufferToBase64(iv),
+    ciphertext: arrayBufferToBase64(ciphertext),
+    authTag: arrayBufferToBase64(authTag),
+    sha256,
+  };
+}
+
+/**
+ * Decrypt ciphertext using custom AES-256-CBC
+ */
+export async function decryptMessage(
+  iv: string,
+  ciphertext: string,
+  authTag: string,
+  key: Uint8Array,
+  aadString: string
+): Promise<string> {
+  const ivBuffer = new Uint8Array(base64ToArrayBuffer(iv));
+  const ciphertextBuffer = new Uint8Array(base64ToArrayBuffer(ciphertext));
+  const receivedAuthTag = authTag;
+  const encoder = new TextEncoder();
+
+  // Verify HMAC authentication tag
+  const computedAuthTag = await computeHMAC(key, new Uint8Array([...ciphertextBuffer, ...encoder.encode(aadString)]));
+  const computedAuthTagBase64 = arrayBufferToBase64(computedAuthTag);
+
+  if (computedAuthTagBase64 !== receivedAuthTag) {
+    throw new Error('Authentication failed - message may have been tampered with');
+  }
+
+  try {
+    // Create AES cipher
+    const aes = new AES256(key);
+
+    // Decrypt with AES-CBC
+    const decryptedBuffer = aes.decryptCBC(ciphertextBuffer, ivBuffer);
+
+    const decoder = new TextDecoder();
+    return decoder.decode(decryptedBuffer);
+  } catch (error) {
+    throw new Error('Decryption failed - invalid key or corrupted data');
+  }
+}
+
+/**
+ * Verify SHA-256 hash of decrypted plaintext
+ */
+export async function verifyHash(plaintext: string, expectedHash: string): Promise<boolean> {
+  const actualHash = await computeSHA256Custom(plaintext);
+  return actualHash === expectedHash.toLowerCase();
+}
+
+// Helper functions for base64 encoding/decoding
+function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   let binary = '';
   for (let i = 0; i < bytes.byteLength; i++) {
     binary += String.fromCharCode(bytes[i]);
@@ -25,173 +198,153 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function arrayBufferToHex(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  return Array.from(bytes)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
+// Export salt conversion helpers
+export function saltToBase64(salt: Uint8Array): string {
+  return arrayBufferToBase64(salt);
 }
 
-export async function deriveKey(
-  passphrase: string,
-  salt: string
-): Promise<CryptoKey> {
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(passphrase),
-    'PBKDF2',
-    false,
-    ['deriveBits', 'deriveKey']
-  );
-
-  return crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: base64ToArrayBuffer(salt),
-      iterations: 200000,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
+export function base64ToSalt(base64: string): Uint8Array {
+  return new Uint8Array(base64ToArrayBuffer(base64));
 }
 
-export function generateSalt(): string {
-  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-  return arrayBufferToBase64(saltBytes.buffer);
-}
+// ============================================================================
+// EDUCATIONAL CIPHERS (XOR and Caesar)
+// ============================================================================
 
-export async function sha256Hash(text: string): Promise<string> {
-  const enc = new TextEncoder();
-  const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(text));
-  return arrayBufferToHex(hashBuffer);
-}
-
-export async function encryptAESGCM(
-  plaintext: string,
-  key: CryptoKey,
-  aad: { senderId: string; recipientId: string; counter: number }
-): Promise<EncryptionResult> {
-  const enc = new TextEncoder();
-  const plaintextBytes = enc.encode(plaintext);
+/**
+ * XOR Cipher - Simple bitwise XOR operation
+ * Security: LOW - Pattern analysis can easily break it
+ */
+export async function encryptXOR(plaintext: string, key: string): Promise<EncryptedData> {
+  const encoder = new TextEncoder();
+  const plaintextBytes = encoder.encode(plaintext);
+  const keyBytes = encoder.encode(key);
   
-  const iv = crypto.getRandomValues(new Uint8Array(12));
+  // XOR operation
+  const cipherBytes = new Uint8Array(plaintextBytes.length);
+  for (let i = 0; i < plaintextBytes.length; i++) {
+    cipherBytes[i] = plaintextBytes[i] ^ keyBytes[i % keyBytes.length];
+  }
   
-  const aadString = JSON.stringify(aad);
-  const aadBytes = enc.encode(aadString);
-  
-  const encrypted = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: iv,
-      additionalData: aadBytes,
-    },
-    key,
-    plaintextBytes
-  );
-  
-  const encryptedBytes = new Uint8Array(encrypted);
-  const tagLength = 16;
-  const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - tagLength);
-  const authTag = encryptedBytes.slice(encryptedBytes.length - tagLength);
-  
-  const hash = await sha256Hash(plaintext);
+  const sha256 = await computeSHA256Custom(plaintext);
   
   return {
-    ciphertext: arrayBufferToBase64(ciphertext.buffer),
-    iv: arrayBufferToBase64(iv.buffer),
-    authTag: arrayBufferToBase64(authTag.buffer),
-    sha256: hash,
+    iv: '', // XOR doesn't use IV
+    ciphertext: arrayBufferToBase64(cipherBytes),
+    authTag: '', // XOR doesn't have authentication
+    sha256
   };
 }
 
-export async function decryptAESGCM(
-  ciphertext: string,
-  authTag: string,
-  iv: string,
-  key: CryptoKey,
-  aad: { senderId: string; recipientId: string; counter: number }
-): Promise<string> {
-  const ciphertextBytes = new Uint8Array(base64ToArrayBuffer(ciphertext));
-  const authTagBytes = new Uint8Array(base64ToArrayBuffer(authTag));
-  const ivBytes = new Uint8Array(base64ToArrayBuffer(iv));
+export async function decryptXOR(ciphertext: string, key: string): Promise<string> {
+  const cipherBytes = new Uint8Array(base64ToArrayBuffer(ciphertext));
+  const keyBytes = new TextEncoder().encode(key);
   
-  const combined = new Uint8Array(ciphertextBytes.length + authTagBytes.length);
-  combined.set(ciphertextBytes);
-  combined.set(authTagBytes, ciphertextBytes.length);
+  // XOR operation (same as encryption)
+  const plaintextBytes = new Uint8Array(cipherBytes.length);
+  for (let i = 0; i < cipherBytes.length; i++) {
+    plaintextBytes[i] = cipherBytes[i] ^ keyBytes[i % keyBytes.length];
+  }
   
-  const enc = new TextEncoder();
-  const aadString = JSON.stringify(aad);
-  const aadBytes = enc.encode(aadString);
-  
-  const decrypted = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: ivBytes,
-      additionalData: aadBytes,
-    },
-    key,
-    combined
-  );
-  
-  const dec = new TextDecoder();
-  return dec.decode(decrypted);
+  const decoder = new TextDecoder();
+  return decoder.decode(plaintextBytes);
 }
 
-export function encryptXOR(plaintext: string, key: string): string {
-  if (!key) return plaintext;
+/**
+ * Caesar Cipher - Classical substitution cipher
+ * Security: VERY LOW - Only 26 possible keys, trivial to brute force
+ */
+export async function encryptCaesar(plaintext: string, key: string): Promise<EncryptedData> {
+  // Derive shift value from key
+  let shift = 0;
+  for (let i = 0; i < key.length; i++) {
+    shift += key.charCodeAt(i);
+  }
+  shift = shift % 26;
   
-  let result = '';
+  let ciphertext = '';
   for (let i = 0; i < plaintext.length; i++) {
-    const charCode = plaintext.charCodeAt(i) ^ key.charCodeAt(i % key.length);
-    result += charCode.toString(16).padStart(2, '0');
+    const char = plaintext[i];
+    if (char >= 'a' && char <= 'z') {
+      ciphertext += String.fromCharCode(((char.charCodeAt(0) - 97 + shift) % 26) + 97);
+    } else if (char >= 'A' && char <= 'Z') {
+      ciphertext += String.fromCharCode(((char.charCodeAt(0) - 65 + shift) % 26) + 65);
+    } else {
+      ciphertext += char; // Non-alphabetic characters unchanged
+    }
   }
-  return result;
+  
+  const sha256 = await computeSHA256Custom(plaintext);
+  
+  return {
+    iv: shift.toString(), // Store shift in IV field
+    ciphertext: btoa(ciphertext), // base64 encode
+    authTag: '', // Caesar doesn't have authentication
+    sha256
+  };
 }
 
-export function decryptXOR(ciphertext: string, key: string): string {
-  if (!key) return ciphertext;
+export async function decryptCaesar(ciphertext: string, iv: string): Promise<string> {
+  const shift = parseInt(iv) || 0;
+  const decoded = atob(ciphertext);
   
-  let result = '';
-  for (let i = 0; i < ciphertext.length; i += 2) {
-    const hexByte = ciphertext.substr(i, 2);
-    const charCode = parseInt(hexByte, 16) ^ key.charCodeAt((i / 2) % key.length);
-    result += String.fromCharCode(charCode);
+  let plaintext = '';
+  for (let i = 0; i < decoded.length; i++) {
+    const char = decoded[i];
+    if (char >= 'a' && char <= 'z') {
+      plaintext += String.fromCharCode(((char.charCodeAt(0) - 97 - shift + 26) % 26) + 97);
+    } else if (char >= 'A' && char <= 'Z') {
+      plaintext += String.fromCharCode(((char.charCodeAt(0) - 65 - shift + 26) % 26) + 65);
+    } else {
+      plaintext += char;
+    }
   }
-  return result;
+  
+  return plaintext;
 }
 
-export function encryptCaesar(plaintext: string, key: string, shift: number = 3): string {
-  const actualShift = key ? (shift + key.charCodeAt(0)) % 26 : shift;
-  
-  return plaintext
-    .split('')
-    .map(char => {
-      if (char >= 'a' && char <= 'z') {
-        return String.fromCharCode(((char.charCodeAt(0) - 97 + actualShift) % 26) + 97);
-      } else if (char >= 'A' && char <= 'Z') {
-        return String.fromCharCode(((char.charCodeAt(0) - 65 + actualShift) % 26) + 65);
+// ============================================================================
+// UNIFIED ENCRYPTION/DECRYPTION INTERFACE
+// ============================================================================
+
+export async function encryptWithCipher(
+  plaintext: string,
+  key: CryptoKey | Uint8Array | string,
+  cipher: CipherType,
+  aadString?: string
+): Promise<EncryptedData> {
+  switch (cipher) {
+    case 'XOR':
+      return encryptXOR(plaintext, key as string);
+    case 'CAESAR':
+      return encryptCaesar(plaintext, key as string);
+    case 'AES-256-CBC':
+      if (typeof key === 'string' || !aadString) {
+        throw new Error('AES-256-CBC requires Uint8Array key and AAD');
       }
-      return char;
-    })
-    .join('');
+      return encryptMessage(plaintext, key as Uint8Array, aadString);
+    default:
+      throw new Error(`Unknown cipher: ${cipher}`);
+  }
 }
 
-export function decryptCaesar(ciphertext: string, key: string, shift: number = 3): string {
-  const actualShift = key ? (shift + key.charCodeAt(0)) % 26 : shift;
-  
-  return ciphertext
-    .split('')
-    .map(char => {
-      if (char >= 'a' && char <= 'z') {
-        return String.fromCharCode(((char.charCodeAt(0) - 97 - actualShift + 26) % 26) + 97);
-      } else if (char >= 'A' && char <= 'Z') {
-        return String.fromCharCode(((char.charCodeAt(0) - 65 - actualShift + 26) % 26) + 65);
+export async function decryptWithCipher(
+  encrypted: EncryptedData,
+  key: CryptoKey | Uint8Array | string,
+  cipher: CipherType,
+  aadString?: string
+): Promise<string> {
+  switch (cipher) {
+    case 'XOR':
+      return decryptXOR(encrypted.ciphertext, key as string);
+    case 'CAESAR':
+      return decryptCaesar(encrypted.ciphertext, encrypted.iv);
+    case 'AES-256-CBC':
+      if (typeof key === 'string' || !aadString) {
+        throw new Error('AES-256-CBC requires Uint8Array key and AAD');
       }
-      return char;
-    })
-    .join('');
+      return decryptMessage(encrypted.iv, encrypted.ciphertext, encrypted.authTag, key as Uint8Array, aadString);
+    default:
+      throw new Error(`Unknown cipher: ${cipher}`);
+  }
 }
